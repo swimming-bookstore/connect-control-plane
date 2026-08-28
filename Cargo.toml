@@ -1,0 +1,50 @@
+[package]
+name = "connect-control-plane"
+version = "0.1.0"
+edition = "2021"
+default-run = "connect-control-plane"
+autobins = false
+description = "Multi-tenant control plane: agents connect, tenants never mix"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+getrandom = "0.2"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid"] }
+uuid = { version = "1", features = ["v4", "v5"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync", "io-std", "io-util", "process"] }
+tokio-stream = "0.1"
+tonic = { version = "0.14", features = ["tls-ring"] }
+tonic-prost = "0.14"
+prost = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = { version = "0.8", features = ["ws"], optional = true }
+futures-util = { version = "0.3", optional = true }
+leptos = { version = "0.7", default-features = false, features = ["ssr"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[features]
+default = []
+demo-web = ["dep:axum", "dep:futures-util", "dep:leptos", "dep:serde", "dep:serde_json"]
+
+[[bin]]
+name = "connect-control-plane"
+path = "src/main.rs"
+
+[[bin]]
+name = "demo-agent"
+path = "src/bin/demo-agent.rs"
+
+[[bin]]
+name = "demo-web"
+path = "src/bin/demo-web/main.rs"
+required-features = ["demo-web"]
+
+[build-dependencies]
+protoc-bin-vendored = "3"
+tonic-prost-build = "0.14"

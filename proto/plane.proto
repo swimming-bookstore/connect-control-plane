@@ -1,0 +1,56 @@
+syntax = "proto3";
+package ccp;
+
+service Plane {
+  rpc Session(stream ClientMsg) returns (stream ServerMsg);
+}
+
+message ClientMsg {
+  oneof msg {
+    Hello hello = 1;
+    App app = 2;
+  }
+}
+
+message ServerMsg {
+  oneof msg {
+    Welcome welcome = 1;
+    Delta delta = 2;
+    App app = 3;
+  }
+}
+
+// token is per-agent, scoped to one tenant. pub is 32 bytes, bound on first use.
+message Hello {
+  string token = 1;
+  bytes pub = 2;
+}
+
+message Welcome {
+  string agent_id = 1;
+  string tenant = 2;
+  string name = 3;
+  repeated Peer peers = 4;
+}
+
+message Peer {
+  string id = 1;
+  string name = 2;
+  bytes pub = 3;
+}
+
+// Presence change inside the tenant. Never crosses tenants.
+message Delta {
+  repeated Peer upsert = 1;
+  repeated string remove = 2;
+}
+
+// L7 pipe via the plane. src is overwritten by the plane.
+// channel is a per-pair circuit: Alice→box and Bob→box are distinct.
+// Empty channel: plane creates (or reuses) the pair's channel and stamps it.
+message App {
+  string src = 1;
+  string dst = 2;
+  bytes data = 3;
+  string channel = 4;
+}
