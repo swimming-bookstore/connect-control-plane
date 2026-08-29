@@ -1,4 +1,4 @@
-# Control plane protocol
+# Connect Control Plane protocol
 
 Agents speak gRPC over TLS. One RPC. Alice's tenant never shares a map or an `App` with Bob's.
 

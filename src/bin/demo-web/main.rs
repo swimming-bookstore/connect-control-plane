@@ -1,7 +1,7 @@
 //! Leptos UI for the two-replica demo: planes, boxes, alice, bob.
 
 mod pb {
-    tonic::include_proto!("ccp");
+    tonic::include_proto!("connect");
 }
 mod ui;
 
@@ -38,7 +38,7 @@ use pb::{App, ClientMsg, Hello, Peer};
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
 #[derive(Parser)]
-#[command(name = "demo-web", about = "Leptos demo UI for connect-control-plane")]
+#[command(name = "demo-web", about = "Leptos demo UI for Connect Control Plane")]
 struct Cli {
     #[arg(long, env = "DATABASE_URL")]
     database_url: Option<String>,
@@ -396,7 +396,7 @@ fn reset_db(url: &str) -> Result<()> {
 }
 
 async fn wait_tcp(addr: &str) -> Result<()> {
-    for _ in 0..50 {
+    for _ in 0..100 {
         if tokio::net::TcpStream::connect(addr).await.is_ok() {
             return Ok(());
         }

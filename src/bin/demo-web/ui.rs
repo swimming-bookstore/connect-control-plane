@@ -55,7 +55,7 @@ fn App() -> impl IntoView {
     view! {
         <header class="top">
             <div>
-                <strong>"connect-control-plane"</strong>
+                <strong>"Connect Control Plane"</strong>
                 <span>"Two stateless replicas. Clients never see each other."</span>
             </div>
             <button id="play" type="button">"Play demo"</button>
@@ -253,7 +253,7 @@ pub fn page() -> String {
     format!(
         "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"/>\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>\
-         <title>ccp-demo</title><style>{CSS}</style></head>\
+         <title>Connect Control Plane</title><style>{CSS}</style></head>\
          <body>{body}<script>{JS}</script></body></html>"
     )
 }

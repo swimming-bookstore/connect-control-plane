@@ -1,1 +1,1 @@
-tonic::include_proto!("ccp");
+tonic::include_proto!("connect");
