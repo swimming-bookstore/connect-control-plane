@@ -10,8 +10,8 @@ use connect_control_plane::store::{replica_id, Kind, Store};
 
 #[derive(Parser)]
 #[command(
-    name = "connect-control-plane",
-    about = "Multi-tenant control plane. Agents connect; tenants never mix."
+    name = "connect control plane",
+    about = "Connect Control Plane. Agents connect; tenants never mix."
 )]
 struct Cli {
     /// Postgres URL (tenants, agents, token hashes)

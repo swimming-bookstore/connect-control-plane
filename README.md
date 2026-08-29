@@ -1,4 +1,4 @@
-# connect-control-plane
+# Connect Control Plane
 
 Multi-tenant control plane. Servers install an agent elsewhere; the agent dials this process. No agent ships here.
 

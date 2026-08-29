@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 default-run = "connect-control-plane"
 autobins = false
-description = "Multi-tenant control plane: agents connect, tenants never mix"
+description = "Connect Control Plane: agents connect, tenants never mix"
 license = "MIT"
 
 [dependencies]

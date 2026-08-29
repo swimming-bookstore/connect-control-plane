@@ -405,7 +405,7 @@ def main() -> None:
 
     wid = 0
     for _ in range(40):
-        wid = find_window(dpy, "ccp-demo")
+        wid = find_window(dpy, "Connect Control Plane")
         if wid:
             break
         time.sleep(0.25)

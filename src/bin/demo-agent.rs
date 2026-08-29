@@ -2,7 +2,7 @@
 //! Not a production agent — enough to prove the plane works.
 
 mod pb {
-    tonic::include_proto!("ccp");
+    tonic::include_proto!("connect");
 }
 
 use std::collections::HashMap;
@@ -24,7 +24,7 @@ use pb::{App, ClientMsg, Hello, Peer};
 #[derive(Parser)]
 #[command(
     name = "demo-agent",
-    about = "Example agent for connect-control-plane: join and chat"
+    about = "Example agent for Connect Control Plane: join and chat"
 )]
 struct Cli {
     /// host:port of the plane

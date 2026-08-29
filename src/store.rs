@@ -90,37 +90,36 @@ impl Store {
     }
 
     async fn migrate(&self) -> Result<()> {
-        sqlx::query("SELECT pg_advisory_lock(872634)")
-            .execute(&self.pool)
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(872634)")
+            .execute(&mut *tx)
             .await?;
-        let result = self.migrate_inner().await;
-        sqlx::query("SELECT pg_advisory_unlock(872634)")
-            .execute(&self.pool)
-            .await?;
+        let result = self.migrate_inner(&mut tx).await;
+        tx.commit().await?;
         result
     }
 
-    async fn migrate_inner(&self) -> Result<()> {
+    async fn migrate_inner(&self, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
         let ty: Option<String> = sqlx::query_scalar(
             "SELECT data_type FROM information_schema.columns
              WHERE table_schema = 'public' AND table_name = 'tenants' AND column_name = 'tenant_id'",
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut **tx)
         .await?;
         if matches!(ty.as_deref(), Some("text") | Some("character varying")) {
             sqlx::query("DROP TABLE IF EXISTS app_queue, sessions, agents, tenants CASCADE")
-                .execute(&self.pool)
+                .execute(&mut **tx)
                 .await?;
         }
         let plane_ty: Option<String> = sqlx::query_scalar(
             "SELECT data_type FROM information_schema.columns
              WHERE table_schema = 'public' AND table_name = 'sessions' AND column_name = 'plane_id'",
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut **tx)
         .await?;
         if matches!(plane_ty.as_deref(), Some("text") | Some("character varying")) {
             sqlx::query("DROP TABLE IF EXISTS app_queue, sessions, agents, tenants CASCADE")
-                .execute(&self.pool)
+                .execute(&mut **tx)
                 .await?;
         }
         sqlx::query(
@@ -129,7 +128,7 @@ impl Store {
                 name TEXT NOT NULL
             )",
         )
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS agents (
@@ -143,7 +142,7 @@ impl Store {
                 UNIQUE (tenant_id, name)
             )",
         )
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS sessions (
@@ -156,7 +155,7 @@ impl Store {
                 last_seen TIMESTAMPTZ NOT NULL DEFAULT now()
             )",
         )
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS app_queue (
@@ -169,7 +168,7 @@ impl Store {
                 data BYTEA NOT NULL
             )",
         )
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
         Ok(())
     }
@@ -202,7 +201,7 @@ impl Store {
         .await?
         .rows_affected();
         if n == 1 {
-            let _ = sqlx::query("SELECT pg_notify('ccp_presence', $1)")
+            let _ = sqlx::query("SELECT pg_notify('connect_presence', $1)")
                 .bind(format!("u\t{tenant_id}\t{agent_id}\t{plane_id}"))
                 .execute(&self.pool)
                 .await;
@@ -228,7 +227,7 @@ impl Store {
         .await?
         .rows_affected();
         if n == 1 {
-            let _ = sqlx::query("SELECT pg_notify('ccp_presence', $1)")
+            let _ = sqlx::query("SELECT pg_notify('connect_presence', $1)")
                 .bind(format!(
                     "d\t{tenant_id}\t{agent_id}\t{plane_id}\t{}",
                     kind.as_str()
@@ -258,7 +257,7 @@ impl Store {
             let tid: Uuid = r.get("tenant_id");
             let aid: Uuid = r.get("agent_id");
             let kind: String = r.get("kind");
-            let _ = sqlx::query("SELECT pg_notify('ccp_presence', $1)")
+            let _ = sqlx::query("SELECT pg_notify('connect_presence', $1)")
                 .bind(format!("d\t{tid}\t{aid}\t{plane_id}\t{kind}"))
                 .execute(&self.pool)
                 .await;
@@ -288,7 +287,7 @@ impl Store {
             let pid: Uuid = r.get("plane_id");
             let kind: String = r.get("kind");
             let aid_s = aid.to_string();
-            let _ = sqlx::query("SELECT pg_notify('ccp_presence', $1)")
+            let _ = sqlx::query("SELECT pg_notify('connect_presence', $1)")
                 .bind(format!("d\t{tid}\t{aid_s}\t{pid}\t{kind}"))
                 .execute(&self.pool)
                 .await;
@@ -335,7 +334,7 @@ impl Store {
         .bind(&app.data)
         .execute(&self.pool)
         .await?;
-        let _ = sqlx::query("SELECT pg_notify('ccp_app', $1)")
+        let _ = sqlx::query("SELECT pg_notify('connect_app', $1)")
             .bind(msg_id.to_string())
             .execute(&self.pool)
             .await;

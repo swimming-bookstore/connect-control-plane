@@ -351,7 +351,7 @@ async fn listen_loop(store: Store, live: Live, plane_id: Uuid) {
     loop {
         match sqlx::postgres::PgListener::connect(store.db_url()).await {
             Ok(mut lis) => {
-                if lis.listen("ccp_presence").await.is_err() || lis.listen("ccp_app").await.is_err()
+                if lis.listen("connect_presence").await.is_err() || lis.listen("connect_app").await.is_err()
                 {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
@@ -366,10 +366,10 @@ async fn listen_loop(store: Store, live: Live, plane_id: Uuid) {
                         n = lis.recv() => {
                             let Ok(n) = n else { break };
                             match n.channel() {
-                                "ccp_presence" => {
+                                "connect_presence" => {
                                     handle_presence(&store, &live, plane_id, n.payload()).await;
                                 }
-                                "ccp_app" => drain_queue(&store, &live, plane_id).await,
+                                "connect_app" => drain_queue(&store, &live, plane_id).await,
                                 _ => {}
                             }
                         }

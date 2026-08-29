@@ -5,7 +5,7 @@ out=${1:-.}
 mkdir -p "$out"
 openssl req -x509 -newkey rsa:2048 -nodes \
   -keyout "$out/ca.key" -out "$out/ca.pem" -days 365 \
-  -subj /CN=connect-plane-ca \
+  -subj /CN=connect-control-plane-ca \
   -addext "basicConstraints=critical,CA:TRUE"
 openssl req -newkey rsa:2048 -nodes \
   -keyout "$out/key.pem" -out "$out/server.csr" \

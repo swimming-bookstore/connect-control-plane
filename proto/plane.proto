@@ -1,5 +1,5 @@
 syntax = "proto3";
-package ccp;
+package connect;
 
 service Plane {
   rpc Session(stream ClientMsg) returns (stream ServerMsg);
