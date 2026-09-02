@@ -8,6 +8,8 @@ rpc Session(stream ClientMsg) returns (stream ServerMsg);
 
 First message is `Hello`. Token is per-agent, SHA-256 looked up in Postgres. `pub` is 32 bytes, bound on first success, required forever after. The plane overwrites `App.src`. Duplicate live identity is rejected (no session steal).
 
+Laptops do not need a pre-issued token. They call `DeviceStart` / `DevicePoll` (Grok-style user code). An operator runs `login approve USER-CODE --tenant T --name alice`, which issues a **client** token. Boxes still use `agent add` tokens.
+
 Presence is a snapshot of online counterparts on `Welcome`, then join/leave deltas. Clients see boxes. Boxes see clients and other boxes. Clients do not see each other.
 
 | msg | who | why |
@@ -16,6 +18,8 @@ Presence is a snapshot of online counterparts on `Welcome`, then join/leave delt
 | Welcome | plane | agent_id, tenant, name, online peers |
 | Delta | plane | upsert / remove in this tenant |
 | App | both | opaque L7 pipe, client↔box or box↔box, one **channel** per pair |
+| DeviceStart | laptop | begin login, get user_code |
+| DevicePoll | laptop | pending / done(+token) / denied / expired |
 
 ## Channels
 

@@ -3,6 +3,9 @@ package connect;
 
 service Plane {
   rpc Session(stream ClientMsg) returns (stream ServerMsg);
+  // Laptop login. No token. Operator approves the user code (like Grok device flow).
+  rpc DeviceStart(DeviceStartReq) returns (DeviceStartRes);
+  rpc DevicePoll(DevicePollReq) returns (DevicePollRes);
 }
 
 message ClientMsg {
@@ -53,4 +56,23 @@ message App {
   string dst = 2;
   bytes data = 3;
   string channel = 4;
+}
+
+message DeviceStartReq {}
+
+message DeviceStartRes {
+  string device_code = 1;
+  string user_code = 2;
+  uint64 interval = 3;
+  uint64 expires_in = 4;
+}
+
+message DevicePollReq {
+  string device_code = 1;
+}
+
+message DevicePollRes {
+  string status = 1;
+  string token = 2;
+  uint64 interval = 3;
 }

@@ -4,19 +4,52 @@ Multi-tenant control plane. Servers install an agent elsewhere; the agent dials 
 
 Alice and Bob can both be customers. Their agents never see each other.
 
-Postgres via sqlx. Set `DATABASE_URL` (e.g. `postgres://user:pass@localhost/plane`).
+Postgres via sqlx. Shared TOML (`--config` / `CONNECT_CONFIG` / `/etc/connect/connect.toml`) or `DATABASE_URL`.
 
 ```
-connect-control-plane tenant add acme
-connect-control-plane tenant add acme --id 3d8e0c2a-1b4f-4a9d-9c6e-2f7b1a0d5e44
-connect-control-plane agent add --tenant acme --name box-1
-connect-control-plane agent add --tenant acme --name alice --client
-connect-control-plane serve --tls-cert cert.pem --tls-key key.pem
+connect-control-plane --config /etc/connect/connect.toml serve
+# or CONNECT_CONFIG=/etc/connect/connect.toml
 ```
 
-`:4433` is the only public listen. TLS is required.
+Laptops log in through **[connect-gateway](https://github.com/swimming-bookstore/connect-gateway)** (device / API key / OIDC). The plane still only sees `Hello { token, pub }`. Boxes still use `--token` from `agent add`.
 
-## Setup
+```
+# gateway (auth only — not App)
+connect-gateway --config /etc/connect/connect.toml
+
+# laptop
+connect-client login --gateway http://127.0.0.1:8787 --coord 127.0.0.1:4433 --tls-ca ca.pem
+# prints ABCD-EFGH
+
+# operator
+connect-control-plane login list
+connect-control-plane login approve ABCD-EFGH --tenant acme --name alice
+
+# CI
+connect-control-plane agent key --tenant acme --name ci
+connect-client login --gateway http://127.0.0.1:8787 --coord 127.0.0.1:4433 --api-key ck_…
+
+# OIDC (bind subject once per issuer, then /v1/oidc)
+connect-control-plane oidc bind --issuer https://accounts.google.com --subject sub --tenant acme --name alice
+connect-control-plane oidc bind --issuer https://dex.example --subject github:123 --tenant acme --name alice
+# gateway: --oidc issuer=userinfo (repeat). POST { access_token, issuer? }
+```
+
+`:4433` is the plane. Gateway is a separate HTTP listen. TLS is required on the plane.
+
+## Box ACL (within a tenant)
+
+Default: a client sees **every box** in its tenant. After the first grant, that client is **restricted** to listed boxes. Presence and App both honor this. Gateway still only mints tokens.
+
+```
+connect-control-plane acl grant --tenant acme --client alice --box box-1
+connect-control-plane acl grant --tenant acme --client alice --box box-2
+connect-control-plane acl list --tenant acme --client alice
+connect-control-plane acl revoke --tenant acme --client alice --box box-2
+connect-control-plane acl open --tenant acme --client alice   # unrestricted again
+```
+
+Boxes still see every client that may use them (and other boxes). Clients never see clients.
 
 ```sh
 ./scripts/dev-certs.sh .
