@@ -9,8 +9,11 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::pb::client_msg::Msg as CMsg;
 use crate::pb::plane_server::Plane as PlaneRpc;
 use crate::pb::server_msg::Msg as SMsg;
-use crate::pb::{App, ClientMsg, Delta, Hello, Peer, ServerMsg, Welcome};
-use crate::store::{BindErr, Kind, Store};
+use crate::pb::{
+    App, ClientMsg, Delta, DevicePollReq, DevicePollRes, DeviceStartReq, DeviceStartRes, Hello,
+    Peer, ServerMsg, Welcome,
+};
+use crate::store::{BindErr, DevicePoll, Kind, Store};
 use uuid::Uuid;
 
 const PUB_LEN: usize = 32;
@@ -32,6 +35,7 @@ struct Live {
 
 struct Slot {
     tenant_id: Uuid,
+    agent_id: Uuid,
     kind: Kind,
     tx: mpsc::Sender<Result<ServerMsg, Status>>,
 }
@@ -41,6 +45,7 @@ struct Session {
     tenant_id: Uuid,
     tenant: String,
     agent_id: String,
+    agent_uuid: Uuid,
     name: String,
     kind: Kind,
     pubkey: Vec<u8>,
@@ -98,9 +103,10 @@ impl Plane {
         }
 
         let sess = Session {
-            tenant_id: agent.tenant_id.clone(),
+            tenant_id: agent.tenant_id,
             tenant: agent.tenant.clone(),
             agent_id: agent.agent_id.to_string(),
+            agent_uuid: agent.agent_id,
             name: agent.name.clone(),
             kind: agent.kind,
             pubkey: pk.to_vec(),
@@ -144,29 +150,15 @@ impl Plane {
             g.insert(
                 sess.agent_id.clone(),
                 Slot {
-                    tenant_id: sess.tenant_id.clone(),
+                    tenant_id: sess.tenant_id,
+                    agent_id: sess.agent_uuid,
                     kind: sess.kind,
                     tx: tx.clone(),
                 },
             );
         }
 
-        self.fanout_local(
-            sess.tenant_id,
-            sess.kind,
-            Some(&sess.agent_id),
-            ServerMsg {
-                msg: Some(SMsg::Delta(Delta {
-                    upsert: vec![Peer {
-                        id: sess.agent_id.clone(),
-                        name: sess.name.clone(),
-                        r#pub: sess.pubkey.clone(),
-                    }],
-                    remove: vec![],
-                })),
-            },
-        )
-        .await;
+        self.fanout_join(&sess).await;
         tracing::info!(
             tenant = %sess.tenant,
             agent = %sess.name,
@@ -183,14 +175,24 @@ impl Plane {
         let Ok(rows) = self.store.list_sessions(sess.tenant_id).await else {
             return Vec::new();
         };
-        rows.into_iter()
-            .filter(|a| a.agent_id.to_string() != sess.agent_id && sees(sess.kind, a.kind))
-            .map(|a| Peer {
+        let mut out = Vec::new();
+        for a in rows {
+            if a.agent_id.to_string() == sess.agent_id || !sees(sess.kind, a.kind) {
+                continue;
+            }
+            if !self
+                .allowed_async(sess.kind, sess.agent_uuid, a.kind, a.agent_id)
+                .await
+            {
+                continue;
+            }
+            out.push(Peer {
                 id: a.agent_id.to_string(),
                 name: a.name,
                 r#pub: a.pubkey,
-            })
-            .collect()
+            });
+        }
+        out
     }
 
     async fn handle_app(&self, sess: &Session, mut app: App) {
@@ -218,6 +220,15 @@ impl Plane {
             }
         };
         if !sees(from_kind, dst_kind) {
+            return;
+        }
+        let Ok(other_id) = Uuid::parse_str(&other) else {
+            return;
+        };
+        if !self
+            .allowed_async(sess.kind, sess.agent_uuid, dst_kind, other_id)
+            .await
+        {
             return;
         }
         app.channel = pipe_tag(&sess.agent_id, &other);
@@ -249,18 +260,7 @@ impl Plane {
                 .session_down(aid, sess.tenant_id, self.plane_id, sess.kind)
                 .await;
         }
-        self.fanout_local(
-            sess.tenant_id,
-            sess.kind,
-            Some(&sess.agent_id),
-            ServerMsg {
-                msg: Some(SMsg::Delta(Delta {
-                    upsert: vec![],
-                    remove: vec![sess.agent_id.clone()],
-                })),
-            },
-        )
-        .await;
+        self.fanout_leave(&sess).await;
         tracing::info!(
             tenant = %sess.tenant,
             agent = %sess.name,
@@ -270,21 +270,54 @@ impl Plane {
         );
     }
 
-    async fn fanout_local(
-        &self,
-        tenant_id: Uuid,
-        kind: Kind,
-        except: Option<&str>,
-        msg: ServerMsg,
-    ) {
+    async fn allowed_async(&self, from_kind: Kind, from_id: Uuid, to_kind: Kind, to_id: Uuid) -> bool {
+        match (from_kind, to_kind) {
+            (Kind::Client, Kind::Box) => self.store.client_may_box(from_id, to_id).await,
+            (Kind::Box, Kind::Client) => self.store.client_may_box(to_id, from_id).await,
+            _ => true,
+        }
+    }
+
+    async fn fanout_join(&self, sess: &Session) {
+        let msg = ServerMsg {
+            msg: Some(SMsg::Delta(Delta {
+                upsert: vec![Peer {
+                    id: sess.agent_id.clone(),
+                    name: sess.name.clone(),
+                    r#pub: sess.pubkey.clone(),
+                }],
+                remove: vec![],
+            })),
+        };
         let txs: Vec<_> = {
             let g = self.live.conns.lock().await;
             g.iter()
                 .filter(|(id, s)| {
-                    s.tenant_id == tenant_id
-                        && except.map(|e| *id != e).unwrap_or(true)
-                        && sees(s.kind, kind)
+                    s.tenant_id == sess.tenant_id
+                        && *id != &sess.agent_id
+                        && sees(s.kind, sess.kind)
                 })
+                .map(|(_, s)| (s.kind, s.agent_id, s.tx.clone()))
+                .collect()
+        };
+        for (kind, id, tx) in txs {
+            if self.allowed_async(kind, id, sess.kind, sess.agent_uuid).await {
+                let _ = tx.try_send(Ok(msg.clone()));
+            }
+        }
+    }
+
+    async fn fanout_leave(&self, sess: &Session) {
+        let msg = ServerMsg {
+            msg: Some(SMsg::Delta(Delta {
+                upsert: vec![],
+                remove: vec![sess.agent_id.clone()],
+            })),
+        };
+        let txs: Vec<_> = {
+            let g = self.live.conns.lock().await;
+            g.iter()
+                .filter(|(id, s)| s.tenant_id == sess.tenant_id && *id != &sess.agent_id)
                 .map(|(_, s)| s.tx.clone())
                 .collect()
         };
@@ -455,10 +488,21 @@ async fn handle_presence(store: &Store, live: &Live, plane_id: Uuid, payload: &s
         let g = live.conns.lock().await;
         g.values()
             .filter(|s| s.tenant_id == tenant && sees(s.kind, kind))
-            .map(|s| s.tx.clone())
+            .map(|s| (s.kind, s.agent_id, s.tx.clone()))
             .collect()
     };
-    for tx in txs {
+    let peer_id = Uuid::parse_str(agent).ok();
+    for (skind, sid, tx) in txs {
+        if let Some(pid) = peer_id {
+            let ok = match (skind, kind) {
+                (Kind::Client, Kind::Box) => store.client_may_box(sid, pid).await,
+                (Kind::Box, Kind::Client) => store.client_may_box(pid, sid).await,
+                _ => true,
+            };
+            if !ok {
+                continue;
+            }
+        }
         let _ = tx.try_send(Ok(msg.clone()));
     }
 }
@@ -516,6 +560,58 @@ impl PlaneRpc for Plane {
             plane.drive(req.into_inner(), tx).await;
         });
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn device_start(
+        &self,
+        _req: Request<DeviceStartReq>,
+    ) -> Result<Response<DeviceStartRes>, Status> {
+        let (device_code, user_code, interval, expires_in) = self
+            .store
+            .device_start()
+            .await
+            .map_err(|_| Status::internal("login start"))?;
+        tracing::info!(user_code, "login pending");
+        Ok(Response::new(DeviceStartRes {
+            device_code,
+            user_code,
+            interval,
+            expires_in,
+        }))
+    }
+
+    async fn device_poll(
+        &self,
+        req: Request<DevicePollReq>,
+    ) -> Result<Response<DevicePollRes>, Status> {
+        let code = req.into_inner().device_code;
+        let poll = self
+            .store
+            .device_poll(&code)
+            .await
+            .map_err(|_| Status::internal("login poll"))?;
+        Ok(Response::new(match poll {
+            DevicePoll::Pending => DevicePollRes {
+                status: "pending".into(),
+                token: String::new(),
+                interval: 5,
+            },
+            DevicePoll::Denied => DevicePollRes {
+                status: "denied".into(),
+                token: String::new(),
+                interval: 0,
+            },
+            DevicePoll::Expired => DevicePollRes {
+                status: "expired".into(),
+                token: String::new(),
+                interval: 0,
+            },
+            DevicePoll::Done { token } => DevicePollRes {
+                status: "done".into(),
+                token,
+                interval: 0,
+            },
+        }))
     }
 }
 
@@ -892,5 +988,29 @@ mod tests {
             .await
             .expect_err("pub");
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn grant_hides_ungranted_box() {
+        let (store, plane) = setup().await;
+        let t = uniq("acme");
+        store.create_tenant(&t, None).await.expect("tenant");
+        let alice = store.create_agent(&t, "alice", Kind::Client).await.expect("c");
+        let box1 = store.create_agent(&t, "box-1", Kind::Box).await.expect("b1");
+        let box2 = store.create_agent(&t, "box-2", Kind::Box).await.expect("b2");
+        store.grant_box(&t, "alice", "box-1").await.expect("grant");
+        let (s1, mut r1) = open(&plane, hello(&box1.token, pk(1))).await;
+        let (s2, mut r2) = open(&plane, hello(&box2.token, pk(2))).await;
+        let (sa, mut ra) = open(&plane, hello(&alice.token, pk(3))).await;
+        let wa = pop_welcome(&mut ra);
+        assert!(wa.peers.iter().any(|p| p.id == s1.agent_id));
+        assert!(!wa.peers.iter().any(|p| p.id == s2.agent_id));
+        while r1.try_recv().is_ok() {}
+        while r2.try_recv().is_ok() {}
+        plane.handle_app(&sa, app(&s2.agent_id, b"nope")).await;
+        assert!(r2.try_recv().is_err());
+        plane.handle_app(&sa, app(&s1.agent_id, b"ok")).await;
+        let got = pop_app(&mut r1);
+        assert_eq!(got.data, b"ok");
     }
 }

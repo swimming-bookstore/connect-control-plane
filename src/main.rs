@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
@@ -14,8 +14,10 @@ use connect_control_plane::store::{replica_id, Kind, Store};
     about = "Connect Control Plane. Agents connect; tenants never mix."
 )]
 struct Cli {
+    #[arg(long, global = true, env = "CONNECT_CONFIG")]
+    config: Option<PathBuf>,
     /// Postgres URL (tenants, agents, token hashes)
-    #[arg(long, global = true, env = "DATABASE_URL")]
+    #[arg(long, global = true)]
     database_url: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
@@ -25,14 +27,14 @@ struct Cli {
 enum Cmd {
     /// Listen for agents (TLS required)
     Serve {
-        #[arg(long, default_value = "0.0.0.0:4433")]
-        bind: SocketAddr,
         #[arg(long)]
-        tls_cert: PathBuf,
+        bind: Option<SocketAddr>,
         #[arg(long)]
-        tls_key: PathBuf,
+        tls_cert: Option<PathBuf>,
+        #[arg(long)]
+        tls_key: Option<PathBuf>,
         /// Replica id. Share DATABASE_URL across replicas.
-        #[arg(long, env = "PLANE_ID")]
+        #[arg(long)]
         plane_id: Option<String>,
     },
     Tenant {
@@ -42,6 +44,18 @@ enum Cmd {
     Agent {
         #[command(subcommand)]
         cmd: AgentCmd,
+    },
+    Login {
+        #[command(subcommand)]
+        cmd: LoginCmd,
+    },
+    Oidc {
+        #[command(subcommand)]
+        cmd: OidcCmd,
+    },
+    Acl {
+        #[command(subcommand)]
+        cmd: AclCmd,
     },
 }
 
@@ -54,6 +68,72 @@ enum TenantCmd {
         id: Option<String>,
     },
     List,
+}
+
+#[derive(Subcommand)]
+enum LoginCmd {
+    /// Pending laptop logins (user codes)
+    List,
+    /// Approve a laptop. Issues (or rotates) a client token.
+    Approve {
+        user_code: String,
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        name: String,
+    },
+    Deny {
+        user_code: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AclCmd {
+    /// Allow client to use this box. First grant locks the client to listed boxes only.
+    Grant {
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        client: String,
+        #[arg(long)]
+        r#box: String,
+    },
+    Revoke {
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        client: String,
+        #[arg(long)]
+        r#box: String,
+    },
+    /// Drop the allowlist. Client sees every box in the tenant again.
+    Open {
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        client: String,
+    },
+    List {
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        client: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum OidcCmd {
+    /// Map an IdP subject to a client agent.
+    Bind {
+        #[arg(long)]
+        issuer: String,
+        #[arg(long)]
+        subject: String,
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -77,6 +157,30 @@ enum AgentCmd {
         #[arg(long)]
         name: String,
     },
+    /// API key that the gateway exchanges for a client token (CI).
+    Key {
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Assign a machine to a person. Empty owner = organization machine.
+    Owner {
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "")]
+        owner: String,
+    },
+    /// owner | admin | member
+    Role {
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        name: String,
+        role: String,
+    },
 }
 
 #[tokio::main]
@@ -90,9 +194,8 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let Some(database_url) = cli.database_url else {
-        bail!("DATABASE_URL is required");
-    };
+    let cfg = connect_control_plane::cfg::Cfg::load(cli.config.as_deref())?;
+    let database_url = cfg.database_url(cli.database_url)?;
     let store = Store::connect(&database_url).await?;
     match cli.cmd {
         Cmd::Serve {
@@ -100,9 +203,26 @@ async fn main() -> Result<()> {
             tls_cert,
             tls_key,
             plane_id,
-        } => serve(store, bind, tls_cert, tls_key, plane_id).await,
+        } => {
+            let bind = connect_control_plane::cfg::addr(
+                bind,
+                cfg.plane.bind.as_deref(),
+                "0.0.0.0:4433",
+            )?;
+            let tls_cert = tls_cert
+                .or(cfg.plane.tls_cert.clone())
+                .context("--tls-cert or [plane].tls_cert")?;
+            let tls_key = tls_key
+                .or(cfg.plane.tls_key.clone())
+                .context("--tls-key or [plane].tls_key")?;
+            let plane_id = connect_control_plane::cfg::first(plane_id, cfg.plane.id.clone(), "PLANE_ID");
+            serve(store, bind, tls_cert, tls_key, plane_id).await
+        }
         Cmd::Tenant { cmd } => tenant(store, cmd).await,
         Cmd::Agent { cmd } => agent(store, cmd).await,
+        Cmd::Login { cmd } => login(store, cmd).await,
+        Cmd::Oidc { cmd } => oidc(store, cmd).await,
+        Cmd::Acl { cmd } => acl(store, cmd).await,
     }
 }
 
@@ -177,7 +297,16 @@ async fn agent(store: Store, cmd: AgentCmd) -> Result<()> {
                     "unbound"
                 };
                 let status = if a.revoked { "revoked" } else { "active" };
-                tracing::info!(agent = %a.name, kind = a.kind.as_str(), id = %a.agent_id, status, key, "agent");
+                tracing::info!(
+                    agent = %a.name,
+                    kind = a.kind.as_str(),
+                    id = %a.agent_id,
+                    status,
+                    key,
+                    owner = %a.owner,
+                    role = %a.org_role,
+                    "agent"
+                );
             }
         }
         AgentCmd::Revoke { tenant, name } => {
@@ -186,6 +315,107 @@ async fn agent(store: Store, cmd: AgentCmd) -> Result<()> {
                 agent = %name,
                 "revoked (new sessions blocked; live stream ends on disconnect)"
             );
+        }
+        AgentCmd::Key { tenant, name } => {
+            let key = store.mint_api_key(&tenant, &name).await?;
+            tracing::info!(tenant, name, key, "api key (gateway /v1/key)");
+            tracing::warn!("store the key now; it is not saved in plaintext");
+        }
+        AgentCmd::Owner {
+            tenant,
+            name,
+            owner,
+        } => {
+            store.set_box_owner(&tenant, &name, &owner).await?;
+            tracing::info!(tenant, name, owner, "box owner");
+        }
+        AgentCmd::Role {
+            tenant,
+            name,
+            role,
+        } => {
+            store.set_org_role(&tenant, &name, &role).await?;
+            tracing::info!(tenant, name, role, "org role");
+        }
+    }
+    Ok(())
+}
+
+async fn login(store: Store, cmd: LoginCmd) -> Result<()> {
+    match cmd {
+        LoginCmd::List => {
+            let rows = store.list_pending_logins().await?;
+            if rows.is_empty() {
+                tracing::info!("no pending logins");
+            }
+            for (code, exp) in rows {
+                tracing::info!(user_code = %code, expires = %exp, "pending");
+            }
+        }
+        LoginCmd::Approve {
+            user_code,
+            tenant,
+            name,
+        } => {
+            let agent = store.approve_login(&user_code, &tenant, &name).await?;
+            tracing::info!(user_code, tenant, agent, "approved");
+        }
+        LoginCmd::Deny { user_code } => {
+            store.deny_login(&user_code).await?;
+            tracing::info!(user_code, "denied");
+        }
+    }
+    Ok(())
+}
+
+async fn oidc(store: Store, cmd: OidcCmd) -> Result<()> {
+    match cmd {
+        OidcCmd::Bind {
+            issuer,
+            subject,
+            tenant,
+            name,
+        } => {
+            store.bind_oidc(&issuer, &subject, &tenant, &name).await?;
+            tracing::info!(issuer, subject, tenant, name, "oidc bound");
+        }
+    }
+    Ok(())
+}
+
+async fn acl(store: Store, cmd: AclCmd) -> Result<()> {
+    match cmd {
+        AclCmd::Grant {
+            tenant,
+            client,
+            r#box,
+        } => {
+            store.grant_box(&tenant, &client, &r#box).await?;
+            tracing::info!(tenant, client, box_name = %r#box, "granted");
+        }
+        AclCmd::Revoke {
+            tenant,
+            client,
+            r#box,
+        } => {
+            store.revoke_grant(&tenant, &client, &r#box).await?;
+            tracing::info!(tenant, client, box_name = %r#box, "grant revoked");
+        }
+        AclCmd::Open { tenant, client } => {
+            store.clear_grants(&tenant, &client).await?;
+            tracing::info!(tenant, client, "unrestricted");
+        }
+        AclCmd::List { tenant, client } => {
+            let (restricted, boxes) = store.list_grants(&tenant, &client).await?;
+            if !restricted {
+                tracing::info!(client, "unrestricted (all boxes in tenant)");
+            } else if boxes.is_empty() {
+                tracing::info!(client, "restricted, no boxes");
+            } else {
+                for b in boxes {
+                    tracing::info!(client, box_name = %b, "grant");
+                }
+            }
         }
     }
     Ok(())
