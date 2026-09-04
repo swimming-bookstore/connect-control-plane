@@ -64,6 +64,11 @@ pub struct Issued {
     pub token: String,
 }
 
+pub struct ConsolePlane {
+    pub email: String,
+    pub spaces: Vec<Issued>,
+}
+
 #[derive(Debug, Clone)]
 pub struct LiveAgent {
     pub agent_id: Uuid,
@@ -836,7 +841,7 @@ impl Store {
         let token = b64(&rand(32)?);
         let token_hash = Sha256::digest(token.as_bytes()).to_vec();
         let row = sqlx::query(
-            "UPDATE agents SET token_hash = $1, revoked = FALSE
+            "UPDATE agents SET token_hash = $1, revoked = FALSE, pubkey = NULL
              WHERE tenant_id = $2 AND name = $3 AND kind = 'client'
              RETURNING agent_id, pubkey, revoked, owner, org_role",
         )
@@ -1254,6 +1259,42 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(raw)
+    }
+
+    /// Console email/password → plane client tokens for every space this person has.
+    pub async fn console_plane_login(&self, email: &str, password: &str) -> Result<ConsolePlane> {
+        let email = norm_email(email)?;
+        let row = sqlx::query(
+            "SELECT salt, pass_hash, tenant, name, home_id FROM console_operators WHERE email = $1",
+        )
+        .bind(&email)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(r) = row else {
+            bail!("bad email or password");
+        };
+        let salt: Vec<u8> = r.get("salt");
+        let expect: Vec<u8> = r.get("pass_hash");
+        if hash_pass_with(&salt, password) != expect {
+            bail!("bad email or password");
+        }
+        let company: String = r.get("tenant");
+        let name: String = r.get("name");
+        let home: Option<Uuid> = r.try_get("home_id").ok().flatten();
+        let mut spaces = Vec::new();
+        if !company.is_empty() {
+            spaces.push(self.issue_client(&company, &name).await?);
+        }
+        if let Some(home) = home {
+            let already = spaces.iter().any(|i| i.agent.tenant_id == home);
+            if !already {
+                spaces.push(self.issue_client(&home.to_string(), &name).await?);
+            }
+        }
+        if spaces.is_empty() {
+            bail!("no plane identity");
+        }
+        Ok(ConsolePlane { email, spaces })
     }
 
     pub async fn console_who(
